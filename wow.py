@@ -45,6 +45,30 @@ class InvalidSyntaxError(Error):
     def __init__(self, posStart, posEnd, details=''):
         super().__init__(posStart, posStart, 'Invalid Syntax', details)
 
+class RTError(Error):
+    def __init__(self, posStart, posEnd, details, context):
+        super().__init__(posStart, posStart, 'Runtime Error', details)
+        self.context = context
+
+    def as_string(self):
+        result = self.generateTraceback()
+        result += f'{self.errName}: {self.details}'
+        result += '\n\n' + string_with_arrows(self.posStart.fText, self.posStart, self.posEnd)
+        return result
+
+    def generateTraceback(self):
+        result = ''
+        pos = self.posStart
+        context = self.context
+
+        while context: 
+            result = f'File {pos.fName}, line {str(pos.ln + 1)}. in {context.displayName}' + '\n' + result
+            pos = context.parentEntryPos
+            context = context.parent
+
+        return 'Traceback (most recent call last): \n' + result
+        
+
 
 class Position:
     def __init__(self, idx, ln, col, fName, fText):
@@ -145,6 +169,8 @@ class Lexer:
 class NumberNode:
     def __init__(self, tok):
         self.tok = tok
+        self.posStart = self.tok.posStart
+        self.posEnd = self.tok.posEnd
 
     def __repr__(self):
         return f'{self.tok}'
@@ -156,6 +182,9 @@ class BinOpNode:
         self.right = right
         self.operator = operator
 
+        self.posStart = self.left.posStart
+        self.posEnd = self.right.posEnd
+
     def __repr__(self):
 	    return f'({self.left}, {self.operator}, {self.right})'
 
@@ -163,6 +192,9 @@ class UnaryOpNode:
     def __init__(self, operator, node):
         self.operator = operator
         self.node = node
+
+        self.posStart = self.operator.posStart
+        self.posEnd = node.posEnd
 
     def __repr__(self): 
         return f'({self.operator}, {self.node})'
@@ -267,6 +299,11 @@ class Number:
     def __init__(self, value): 
         self.value = value
         self.setPos()
+        self.setContext()
+
+    def setContext(self, context=None):
+        self.context = context
+        return self
     
     def setPos(self, posStart=None, posEnd=None): 
         self.posStart = posStart
@@ -275,47 +312,104 @@ class Number:
 
     def addedTo(self, other):
         if isinstance(other, Number):
-            return Number(self.value + other.value)
+            return Number(self.value + other.value).setContext(self.context), None
     
     def subtractedBy(self, other):
         if isinstance(other, Number):
-            return Number(self.value - other.value)
+            return Number(self.value - other.value).setContext(self.context), None
 
     def multipliedBy(self, other):
         if isinstance(other, Number):
-            return Number(self.value * other.value)
+            return Number(self.value * other.value).setContext(self.context), None
 
     def dividedBy(self, other):
         if isinstance(other, Number): 
-            return Number(self.value / other.value)
+            if other.value == 0: 
+                return None, RTError(
+                    other.posStart, other.posEnd, 'Division by zero', 
+                    self.context
+                )
+            return Number(self.value / other.value).setContext(self.context), None
     
     def __repr__(self): 
         return str(self.value)
 
+class RunTimeResult:
+    def __init__(self): 
+        self.value = None
+        self.error = None
+
+    def register(self, res):
+        if res.error: self.error = res.error
+        return res.value
+
+    def success(self, value): 
+        self.value = value
+        return self
+
+    def failure(self, error):
+        self.error = error
+        return self
+
+class Context: 
+    def __init__(self, displayName, parent=None, parentEntryPos=None):
+        self.displayName = displayName
+        self.parent = parent
+        self.parentEntryPos = parentEntryPos
+
 
 class Interpreter: 
-    def visit(self, node): 
+    def visit(self, node, context): 
         #different method depending on tyoe of node
         methodName = f'visit{type(node).__name__}'
         method = getattr(self, methodName, self.noVisitMethod)
-        return method(node)
-    def noVisitMethod(self, node):
+        return method(node, context)
+    def noVisitMethod(self, node, context):
         
         raise Exception(f'No visit method defined')
 
-    def visitNumberNode(self, node):
+    def visitNumberNode(self, node, context):
         newNumber = Number(node.tok.value)
+        newNumber.setContext(context)
         newNumber.setPos(node.posStart, node.posEnd)
-        return newNumber
+        return RunTimeResult().success(newNumber)
 
-    def visitBinOpNode(self, node):
-        print("Found binary operator node")
-        self.visit(node.left)
-        self.visit(node.right)
+    def visitBinOpNode(self, node, context):
+        #print("Found binary operator node")
+        res = RunTimeResult()
+        left = res.register(self.visit(node.left, context))
+        if res.error: return res
+        right = res.register(self.visit(node.right, context))
 
-    def visitUnaryOpNode(self, node):
-        print("unary op node")
-        self.visit(node.node)
+        if node.operator.type == TT_PLUS: 
+            result, error = left.addedTo(right)
+        elif node.operator.type == TT_MINUS: 
+            result, error = left.subtractedBy(right)
+        elif node.operator.type == TT_MUL: 
+            result, error = left.multipliedBy(right)
+        elif node.operator.type == TT_DIV: 
+            result, error = left.dividedBy(right)
+
+        if error: 
+            return res.failure(error)
+        else:
+            return res.success(result.setPos(node.posStart, node.posEnd))
+
+    def visitUnaryOpNode(self, node, context):
+       # print("unary op node")
+        res = RunTimeResult()
+        number = res.register(self.visit(node.node, context))
+        if res.error: return res
+
+        error = None
+
+        if node.operator.type == TT_MINUS: 
+            number, error = number.multipliedBy(Number(-1))
+
+        if error:
+            return res.failure(error)
+        else:
+            return res.success(number.setPos(node.posStart, node.posEnd))
 
 def run(fName, text):
     lexer = Lexer(fName, text)
@@ -328,6 +422,7 @@ def run(fName, text):
     if ast.error: return None, ast.error
 
     interpreter = Interpreter()
-    interpreter.visit(ast.node)
+    context = Context('<program>')
+    result = interpreter.visit(ast.node, context)
 
-    return None, None
+    return result.value, result.error
