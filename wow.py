@@ -209,10 +209,6 @@ class Parser:
             ))
         return res
 
-    def test(self, s1: str, s2: str):
-        if len(s1) == len(s2): print("Equal")
-        else: print("stupid")
-
     def factor(self):
         res = ParseResult()
         tok = self.current_tok
@@ -267,9 +263,59 @@ class Parser:
 
         return res.success(left)
 
+class Number:
+    def __init__(self, value): 
+        self.value = value
+        self.setPos()
+    
+    def setPos(self, posStart=None, posEnd=None): 
+        self.posStart = posStart
+        self.posEnd = posEnd
+        return self
+
+    def addedTo(self, other):
+        if isinstance(other, Number):
+            return Number(self.value + other.value)
+    
+    def subtractedBy(self, other):
+        if isinstance(other, Number):
+            return Number(self.value - other.value)
+
+    def multipliedBy(self, other):
+        if isinstance(other, Number):
+            return Number(self.value * other.value)
+
+    def dividedBy(self, other):
+        if isinstance(other, Number): 
+            return Number(self.value / other.value)
+    
+    def __repr__(self): 
+        return str(self.value)
 
 
+class Interpreter: 
+    def visit(self, node): 
+        #different method depending on tyoe of node
+        methodName = f'visit{type(node).__name__}'
+        method = getattr(self, methodName, self.noVisitMethod)
+        return method(node)
+    def noVisitMethod(self, node):
         
+        raise Exception(f'No visit method defined')
+
+    def visitNumberNode(self, node):
+        newNumber = Number(node.tok.value)
+        newNumber.setPos(node.posStart, node.posEnd)
+        return newNumber
+
+    def visitBinOpNode(self, node):
+        print("Found binary operator node")
+        self.visit(node.left)
+        self.visit(node.right)
+
+    def visitUnaryOpNode(self, node):
+        print("unary op node")
+        self.visit(node.node)
 
 def run(fName, text):
     lexer = Lexer(fName, text)
@@ -279,5 +325,9 @@ def run(fName, text):
 
     parser = Parser(tokens)
     ast = parser.parse()
+    if ast.error: return None, ast.error
 
-    return ast.node, ast.error
+    interpreter = Interpreter()
+    interpreter.visit(ast.node)
+
+    return None, None
